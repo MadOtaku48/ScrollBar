@@ -18,23 +18,158 @@ struct StockQuote {
     }
 }
 
+// MARK: - Config
+
+struct SymbolEntry: Codable {
+    let symbol: String
+    let name: String
+    let group: String
+}
+
+struct AppConfig: Codable {
+    var symbols: [SymbolEntry]
+    var groups: [String]  // group names in display order
+
+    static let defaultConfig = AppConfig(
+        symbols: [
+            SymbolEntry(symbol: "^KS11", name: "KOSPI", group: "Korean Markets"),
+            SymbolEntry(symbol: "^KQ11", name: "KOSDAQ", group: "Korean Markets"),
+            SymbolEntry(symbol: "^DJI", name: "DOW", group: "US Markets"),
+            SymbolEntry(symbol: "^IXIC", name: "NASDAQ", group: "US Markets"),
+            SymbolEntry(symbol: "^GSPC", name: "S&P500", group: "US Markets"),
+            SymbolEntry(symbol: "USDKRW=X", name: "USD/KRW", group: "Currency"),
+            SymbolEntry(symbol: "JPYKRW=X", name: "JPY/KRW", group: "Currency"),
+            SymbolEntry(symbol: "475830.KQ", name: "Orum", group: "Watchlist"),
+            SymbolEntry(symbol: "005935.KS", name: "SamsungElecPF", group: "Watchlist"),
+            SymbolEntry(symbol: "032830.KS", name: "SamsungLife", group: "Watchlist"),
+            SymbolEntry(symbol: "069500.KS", name: "KODEX200", group: "Watchlist"),
+            SymbolEntry(symbol: "NVDA", name: "NVIDIA", group: "Watchlist"),
+            SymbolEntry(symbol: "CVX", name: "Chevron", group: "Watchlist"),
+            SymbolEntry(symbol: "KO", name: "Coca-Cola", group: "Watchlist"),
+            SymbolEntry(symbol: "LLY", name: "Eli Lilly", group: "Watchlist"),
+        ],
+        groups: ["Korean Markets", "US Markets", "Currency", "Watchlist"]
+    )
+}
+
+class ConfigManager {
+    static let shared = ConfigManager()
+
+    private(set) var config: AppConfig = .defaultConfig
+    private var fileWatcher: DispatchSourceFileSystemObject?
+    var onConfigChange: (() -> Void)?
+
+    var configDir: URL {
+        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        return appSupport.appendingPathComponent("ScrollBar")
+    }
+
+    var configFile: URL {
+        configDir.appendingPathComponent("config.json")
+    }
+
+    func load() {
+        let fm = FileManager.default
+
+        // Create dir if needed
+        if !fm.fileExists(atPath: configDir.path) {
+            try? fm.createDirectory(at: configDir, withIntermediateDirectories: true)
+        }
+
+        // Write default if no file exists
+        if !fm.fileExists(atPath: configFile.path) {
+            save(config: .defaultConfig)
+        }
+
+        // Read
+        reload()
+
+        // Watch for changes
+        startWatching()
+    }
+
+    func reload() {
+        guard let data = try? Data(contentsOf: configFile),
+              let loaded = try? JSONDecoder().decode(AppConfig.self, from: data) else {
+            print("Config: using defaults (parse error or missing file)")
+            config = .defaultConfig
+            return
+        }
+        config = loaded
+    }
+
+    func save(config: AppConfig) {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        guard let data = try? encoder.encode(config) else { return }
+        try? data.write(to: configFile, options: .atomic)
+    }
+
+    private func startWatching() {
+        let fd = open(configFile.path, O_EVTONLY)
+        guard fd >= 0 else { return }
+
+        let source = DispatchSource.makeFileSystemObjectSource(
+            fileDescriptor: fd,
+            eventMask: [.write, .rename],
+            queue: .main
+        )
+        source.setEventHandler { [weak self] in
+            guard let self = self else { return }
+            // Small delay to let the write finish
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                self.reload()
+                self.onConfigChange?()
+            }
+        }
+        source.setCancelHandler { close(fd) }
+        source.resume()
+        fileWatcher = source
+    }
+
+    // Helpers
+    var allSymbols: [(String, String)] {
+        config.symbols.map { ($0.symbol, $0.name) }
+    }
+
+    var groupNames: [String] {
+        config.groups
+    }
+
+    func symbolKeys(for groupName: String) -> [String] {
+        if groupName == "All" { return config.symbols.map { $0.symbol } }
+        return config.symbols.filter { $0.group == groupName }.map { $0.symbol }
+    }
+}
+
 // MARK: - Symbol Groups
 
-enum SymbolGroup: String, CaseIterable {
-    case all = "All"
-    case korean = "Korean Markets"
-    case us = "US Markets"
-    case currency = "Currency"
-    case watchlist = "Watchlist"
+enum SymbolGroup: Hashable {
+    case all
+    case named(String)
+
+    var displayName: String {
+        switch self {
+        case .all: return "All"
+        case .named(let name): return name
+        }
+    }
 
     var symbolKeys: [String] {
         switch self {
-        case .all:       return MarketDataManager.shared.symbols.map { $0.0 }
-        case .korean:    return ["^KS11", "^KQ11"]
-        case .us:        return ["^DJI", "^IXIC", "^GSPC"]
-        case .currency:  return ["USDKRW=X", "JPYKRW=X"]
-        case .watchlist: return ["475830.KQ", "005935.KS", "032830.KS", "069500.KS", "NVDA", "CVX", "KO", "LLY"]
+        case .all: return ConfigManager.shared.allSymbols.map { $0.0 }
+        case .named(let name): return ConfigManager.shared.symbolKeys(for: name)
         }
+    }
+
+    static var allCases: [SymbolGroup] {
+        [.all] + ConfigManager.shared.groupNames.map { .named($0) }
+    }
+
+    static func from(_ name: String) -> SymbolGroup? {
+        if name == "All" { return .all }
+        if ConfigManager.shared.groupNames.contains(name) { return .named(name) }
+        return nil
     }
 }
 
@@ -72,24 +207,9 @@ struct ColoredSegment {
 class MarketDataManager {
     static let shared = MarketDataManager()
 
-    // (Yahoo symbol, display name)
-    let symbols: [(String, String)] = [
-        ("^KS11", "KOSPI"),
-        ("^KQ11", "KOSDAQ"),
-        ("^DJI", "DOW"),
-        ("^IXIC", "NASDAQ"),
-        ("^GSPC", "S&P500"),
-        ("USDKRW=X", "USD/KRW"),
-        ("JPYKRW=X", "JPY/KRW"),
-        ("475830.KQ", "Orum"),
-        ("005935.KS", "SamsungElecPF"),
-        ("032830.KS", "SamsungLife"),
-        ("069500.KS", "KODEX200"),
-        ("NVDA", "NVIDIA"),
-        ("CVX", "Chevron"),
-        ("KO", "Coca-Cola"),
-        ("LLY", "Eli Lilly"),
-    ]
+    var symbols: [(String, String)] {
+        ConfigManager.shared.allSymbols
+    }
 
     var quotes: [StockQuote] = []
     var onUpdate: (([StockQuote]) -> Void)?
@@ -539,6 +659,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Load config from JSON
+        ConfigManager.shared.load()
+        ConfigManager.shared.onConfigChange = { [weak self] in
+            self?.handleConfigChange()
+        }
+
         // Small icon-only status item for menu access
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         if let button = statusItem.button {
@@ -547,8 +673,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem.menu = buildMenu()
 
         // Create primary screen ticker window
+        let defaultPrimaryGroups: Set<SymbolGroup> = Set(
+            ConfigManager.shared.groupNames.filter { $0 != "Watchlist" }.map { .named($0) }
+        )
         if let mainScreen = NSScreen.main {
-            let pw = MonitorTickerWindow(screen: mainScreen, groups: [.korean, .us, .currency], width: currentWidth)
+            let pw = MonitorTickerWindow(screen: mainScreen, groups: defaultPrimaryGroups.isEmpty ? [.all] : defaultPrimaryGroups, width: currentWidth)
             pw.orderFront(nil)
             primaryWindow = pw
         }
@@ -629,6 +758,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         menu.addItem(NSMenuItem.separator())
 
+        // Config
+        let editConfigItem = NSMenuItem(title: "Edit Config...", action: #selector(openConfig), keyEquivalent: ",")
+        editConfigItem.target = self
+        menu.addItem(editConfigItem)
+
+        let reloadConfigItem = NSMenuItem(title: "Reload Config", action: #selector(reloadConfig), keyEquivalent: "")
+        reloadConfigItem.target = self
+        menu.addItem(reloadConfigItem)
+
+        menu.addItem(NSMenuItem.separator())
+
         // Launch at Login
         if Bundle.main.bundleIdentifier != nil {
             let loginItem = NSMenuItem(title: "Launch at Login", action: #selector(toggleLaunchAtLogin(_:)), keyEquivalent: "")
@@ -666,9 +806,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             let groupMenu = NSMenuItem(title: "  Content", action: nil, keyEquivalent: "")
             let groupSubmenu = NSMenu()
             for group in SymbolGroup.allCases {
-                let gItem = NSMenuItem(title: group.rawValue, action: #selector(togglePrimaryGroup(_:)), keyEquivalent: "")
+                let gItem = NSMenuItem(title: group.displayName, action: #selector(togglePrimaryGroup(_:)), keyEquivalent: "")
                 gItem.target = self
-                gItem.representedObject = group.rawValue as NSString
+                gItem.representedObject = group.displayName as NSString
                 gItem.state = pw.symbolGroups.contains(group) ? .on : .off
                 groupSubmenu.addItem(gItem)
             }
@@ -701,13 +841,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                     let groupSubmenu = NSMenu()
                     for group in SymbolGroup.allCases {
                         let gItem = NSMenuItem(
-                            title: group.rawValue,
+                            title: group.displayName,
                             action: #selector(toggleSecondaryGroup(_:)),
                             keyEquivalent: ""
                         )
                         gItem.target = self
                         gItem.tag = i
-                        gItem.representedObject = group.rawValue as NSString
+                        gItem.representedObject = group.displayName as NSString
                         gItem.state = existing.symbolGroups.contains(group) ? .on : .off
                         groupSubmenu.addItem(gItem)
                     }
@@ -764,7 +904,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             if screen == primaryScreen { continue }
             if secondaryWindows.contains(where: { $0.screen_ == screen }) { continue }
 
-            let window = MonitorTickerWindow(screen: screen, groups: [.watchlist], width: currentWidth)
+            let watchlistGroup: SymbolGroup = ConfigManager.shared.groupNames.contains("Watchlist") ? .named("Watchlist") : .all
+            let window = MonitorTickerWindow(screen: screen, groups: [watchlistGroup], width: currentWidth)
             window.tickerView.updateSpeed(currentSpeed)
             window.updateWithQuotes(MarketDataManager.shared.quotes)
             window.orderFront(nil)
@@ -778,6 +919,24 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         for window in allTickerWindows {
             window.updateWithQuotes(quotes)
         }
+    }
+
+    // MARK: - Config Actions
+
+    @objc private func openConfig() {
+        NSWorkspace.shared.open(ConfigManager.shared.configFile)
+    }
+
+    @objc private func reloadConfig() {
+        handleConfigChange()
+    }
+
+    private func handleConfigChange() {
+        ConfigManager.shared.reload()
+        // Refresh data with new symbols
+        MarketDataManager.shared.refresh()
+        // Rebuild menu to reflect new groups
+        statusItem.menu = buildMenu()
     }
 
     // MARK: - Actions
@@ -857,7 +1016,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             pw.orderOut(nil)
             primaryWindow = nil
         } else if let mainScreen = NSScreen.main {
-            let pw = MonitorTickerWindow(screen: mainScreen, groups: [.korean, .us, .currency], width: currentWidth)
+            let defaultGroups: Set<SymbolGroup> = Set(
+                ConfigManager.shared.groupNames.filter { $0 != "Watchlist" }.map { .named($0) }
+            )
+            let pw = MonitorTickerWindow(screen: mainScreen, groups: defaultGroups.isEmpty ? [.all] : defaultGroups, width: currentWidth)
             pw.tickerView.updateSpeed(currentSpeed)
             pw.updateWithQuotes(MarketDataManager.shared.quotes)
             pw.orderFront(nil)
@@ -868,7 +1030,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func togglePrimaryGroup(_ sender: NSMenuItem) {
         guard let groupName = sender.representedObject as? String,
-              let group = SymbolGroup(rawValue: groupName),
+              let group = SymbolGroup.from(groupName),
               let pw = primaryWindow else { return }
 
         if group == .all {
@@ -897,11 +1059,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             secondaryWindows[idx].orderOut(nil)
             secondaryWindows.remove(at: idx)
         } else {
-            // Default group varies by screen index
-            let groupList: [SymbolGroup] = [.korean, .us, .currency, .watchlist]
-            let defaultGroup = groupList[(screenIndex) % groupList.count]
-
-            let window = MonitorTickerWindow(screen: screen, groups: [defaultGroup], width: currentWidth)
+            // Default: Watchlist for secondary screens
+            let watchlistGroup: SymbolGroup = ConfigManager.shared.groupNames.contains("Watchlist") ? .named("Watchlist") : .all
+            let window = MonitorTickerWindow(screen: screen, groups: [watchlistGroup], width: currentWidth)
             window.tickerView.updateSpeed(currentSpeed)
             window.updateWithQuotes(MarketDataManager.shared.quotes)
             window.orderFront(nil)
@@ -916,7 +1076,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         guard screenIndex < screens.count else { return }
         let screen = screens[screenIndex]
         guard let groupName = sender.representedObject as? String,
-              let group = SymbolGroup(rawValue: groupName) else { return }
+              let group = SymbolGroup.from(groupName) else { return }
 
         if let window = secondaryWindows.first(where: { $0.screen_ == screen }) {
             if group == .all {
