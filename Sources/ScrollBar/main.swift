@@ -609,10 +609,14 @@ class MonitorTickerWindow: NSPanel {
 
     func updateWidth(_ width: CGFloat) {
         tickerWidth = width
+        reposition()
+    }
+
+    func reposition() {
         let menuBarHeight = NSStatusBar.system.thickness
-        let x = screen_.frame.midX - width / 2
+        let x = screen_.frame.midX - tickerWidth / 2
         let y = screen_.frame.maxY - menuBarHeight
-        setFrame(NSRect(x: x, y: y, width: width, height: menuBarHeight), display: true)
+        setFrame(NSRect(x: x, y: y, width: tickerWidth, height: menuBarHeight), display: true)
     }
 
     static func buildSegments(from quotes: [StockQuote]) -> [ColoredSegment] {
@@ -698,6 +702,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             queue: .main
         ) { [weak self] _ in
             self?.handleScreenChange()
+        }
+
+        // Reposition windows on wake/unlock
+        let wsc = NSWorkspace.shared.notificationCenter
+        for name in [NSWorkspace.screensDidWakeNotification,
+                     NSWorkspace.sessionDidBecomeActiveNotification] {
+            wsc.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                // Small delay to let screen geometry stabilize
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                    self?.repositionAllWindows()
+                }
+            }
         }
     }
 
@@ -918,6 +934,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private func updateAllWindows(quotes: [StockQuote]) {
         for window in allTickerWindows {
             window.updateWithQuotes(quotes)
+        }
+    }
+
+    private func repositionAllWindows() {
+        for window in allTickerWindows {
+            window.reposition()
         }
     }
 
