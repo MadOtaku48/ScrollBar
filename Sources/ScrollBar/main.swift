@@ -5,6 +5,7 @@ import ServiceManagement
 // MARK: - Stock Quote
 
 struct StockQuote {
+    let symbol: String
     let name: String
     let price: Double
     let changePercent: Double
@@ -14,6 +15,26 @@ struct StockQuote {
     var formatted: String {
         let sign = isUp ? "+" : ""
         return "\(name) \(String(format: "%.2f", price)) (\(sign)\(String(format: "%.2f", changePercent))%)"
+    }
+}
+
+// MARK: - Symbol Groups
+
+enum SymbolGroup: String, CaseIterable {
+    case all = "All"
+    case korean = "Korean Markets"
+    case us = "US Markets"
+    case currency = "Currency"
+    case watchlist = "Watchlist"
+
+    var symbolKeys: [String] {
+        switch self {
+        case .all:       return MarketDataManager.shared.symbols.map { $0.0 }
+        case .korean:    return ["^KS11", "^KQ11"]
+        case .us:        return ["^DJI", "^IXIC", "^GSPC"]
+        case .currency:  return ["USDKRW=X", "JPYKRW=X"]
+        case .watchlist: return ["475830.KQ", "005935.KS", "032830.KS", "069500.KS", "NVDA", "CVX", "KO", "LLY"]
+        }
     }
 }
 
@@ -60,7 +81,14 @@ class MarketDataManager {
         ("^GSPC", "S&P500"),
         ("USDKRW=X", "USD/KRW"),
         ("JPYKRW=X", "JPY/KRW"),
-        ("475830.KQ", "OrmThera"),
+        ("475830.KQ", "Orum"),
+        ("005935.KS", "SamsungElecPF"),
+        ("032830.KS", "SamsungLife"),
+        ("069500.KS", "KODEX200"),
+        ("NVDA", "NVIDIA"),
+        ("CVX", "Chevron"),
+        ("KO", "Coca-Cola"),
+        ("LLY", "Eli Lilly"),
     ]
 
     var quotes: [StockQuote] = []
@@ -69,7 +97,6 @@ class MarketDataManager {
 
     func start() {
         refresh()
-        // Refresh every 60 seconds
         refreshTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
             self?.refresh()
         }
@@ -90,7 +117,6 @@ class MarketDataManager {
                       let response = json["quoteResponse"] as? [String: Any],
                       let results = response["result"] as? [[String: Any]] else {
                     print("Parse error: unexpected JSON structure")
-                    // Try v8 chart API as fallback
                     await self.refreshViaChart()
                     return
                 }
@@ -101,7 +127,7 @@ class MarketDataManager {
                     let displayName = self.symbols.first(where: { $0.0 == symbol })?.1 ?? symbol
                     let price = result["regularMarketPrice"] as? Double ?? 0
                     let changePct = result["regularMarketChangePercent"] as? Double ?? 0
-                    newQuotes.append(StockQuote(name: displayName, price: price, changePercent: changePct))
+                    newQuotes.append(StockQuote(symbol: symbol, name: displayName, price: price, changePercent: changePct))
                 }
 
                 await MainActor.run {
@@ -115,7 +141,6 @@ class MarketDataManager {
         }
     }
 
-    // Fallback: fetch each symbol via v8 chart API
     private func refreshViaChart() async {
         var newQuotes: [StockQuote] = []
         for (symbol, name) in symbols {
@@ -138,7 +163,7 @@ class MarketDataManager {
                 let prevClose = meta["chartPreviousClose"] as? Double ?? meta["previousClose"] as? Double ?? price
                 let changePct = prevClose > 0 ? ((price - prevClose) / prevClose) * 100 : 0
 
-                newQuotes.append(StockQuote(name: name, price: price, changePercent: changePct))
+                newQuotes.append(StockQuote(symbol: symbol, name: name, price: price, changePercent: changePct))
             } catch {
                 print("Chart API error (\(symbol)): \(error.localizedDescription)")
             }
@@ -150,6 +175,12 @@ class MarketDataManager {
                 self.onUpdate?(newQuotes)
             }
         }
+    }
+
+    /// Filter quotes by symbol group
+    func quotes(for group: SymbolGroup) -> [StockQuote] {
+        let keys = group.symbolKeys
+        return quotes.filter { keys.contains($0.symbol) }
     }
 }
 
@@ -166,20 +197,18 @@ class DotMatrixRenderer {
     let dotGap: CGFloat
     let font: NSFont
 
-    init(dotRows: Int = 16, dotSize: CGFloat = 0.85, dotGap: CGFloat = 0.45) {
+    init(dotRows: Int = 16, dotSize: CGFloat = 0.55, dotGap: CGFloat = 1.0) {
         self.dotRows = dotRows
         self.dotSize = dotSize
         self.dotGap = dotGap
         let fontSize = CGFloat(dotRows)
-        self.font = NSFont.systemFont(ofSize: fontSize, weight: .bold)
+        self.font = NSFont(name: "HelveticaNeue-Light", size: fontSize) ?? NSFont.systemFont(ofSize: fontSize, weight: .light)
     }
 
     var cellSize: CGFloat { dotSize + dotGap }
     var totalHeight: CGFloat { CGFloat(dotRows) * cellSize }
 
-    /// Render colored segments into a 2D grid with color info
     func rasterize(_ segments: [ColoredSegment]) -> (grid: [[DotPixel]], cols: Int) {
-        // First, calculate total text and build color map
         let fullText = segments.map { $0.text }.joined()
         let attrs: [NSAttributedString.Key: Any] = [.font: font]
         let totalSize = (fullText as NSString).size(withAttributes: attrs)
@@ -187,7 +216,6 @@ class DotMatrixRenderer {
 
         guard totalWidth > 0 else { return ([], 0) }
 
-        // Build column-to-color map by measuring each segment's width
         var colColors = [LEDColor](repeating: .amber, count: totalWidth)
         var currentX: CGFloat = 0
         for seg in segments {
@@ -200,7 +228,6 @@ class DotMatrixRenderer {
             currentX += segWidth
         }
 
-        // Render full text to bitmap
         let bitmapWidth = totalWidth
         let bitmapHeight = dotRows
         guard let context = CGContext(
@@ -260,7 +287,7 @@ class TickerView: NSView {
     private var lastTimestamp: Double = 0
 
     private let bgColor = NSColor(red: 0.01, green: 0.01, blue: 0.015, alpha: 1.0)
-    private let gridColor = NSColor(red: 0.04, green: 0.04, blue: 0.05, alpha: 1.0) // subtle grid dots
+    private let gridColor = NSColor(red: 0.04, green: 0.04, blue: 0.05, alpha: 1.0)
 
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -362,23 +389,18 @@ class TickerView: NSView {
                 let ledColor = pixel.color
 
                 if pixel.isOn {
-                    // Outer glow (soft bloom)
                     let glow2Rect = dotRect.insetBy(dx: -1.2, dy: -1.2)
                     ctx.setFillColor(ledColor.onColor.withAlphaComponent(0.15).cgColor)
                     ctx.fillEllipse(in: glow2Rect)
-                    // Inner glow
                     let glowRect = dotRect.insetBy(dx: -0.5, dy: -0.5)
                     ctx.setFillColor(ledColor.onColor.withAlphaComponent(0.4).cgColor)
                     ctx.fillEllipse(in: glowRect)
-                    // Bright LED dot
                     ctx.setFillColor(ledColor.onColor.cgColor)
                     ctx.fillEllipse(in: dotRect)
-                    // Hot center highlight
                     let centerRect = dotRect.insetBy(dx: dotSize * 0.2, dy: dotSize * 0.2)
                     ctx.setFillColor(ledColor.onColor.withAlphaComponent(0.7).blended(withFraction: 0.5, of: .white)!.cgColor)
                     ctx.fillEllipse(in: centerRect)
                 } else {
-                    // Unlit LED - visible dark dot (like real LED matrix grid)
                     ctx.setFillColor(gridColor.cgColor)
                     ctx.fillEllipse(in: dotRect)
                 }
@@ -397,27 +419,160 @@ class TickerView: NSView {
     }
 }
 
+// MARK: - Monitor Ticker Window (for secondary screens)
+
+class MonitorTickerWindow: NSPanel {
+    let tickerView: TickerView
+    var symbolGroups: Set<SymbolGroup>
+    let screen_: NSScreen
+    private var tickerWidth: CGFloat
+
+    var combinedSymbolKeys: [String] {
+        if symbolGroups.contains(.all) {
+            return MarketDataManager.shared.symbols.map { $0.0 }
+        }
+        var keys: [String] = []
+        // Maintain consistent ordering
+        for group in SymbolGroup.allCases where group != .all && symbolGroups.contains(group) {
+            for key in group.symbolKeys where !keys.contains(key) {
+                keys.append(key)
+            }
+        }
+        return keys
+    }
+
+    init(screen: NSScreen, groups: Set<SymbolGroup>, width: CGFloat = 0) {
+        self.screen_ = screen
+        self.symbolGroups = groups
+
+        // Match the real menu bar height
+        let menuBarHeight = NSStatusBar.system.thickness
+        let tickerHeight = menuBarHeight
+
+        // Default width: 40% of screen, centered horizontally
+        let w = width > 0 ? width : screen.frame.width * 0.4
+        self.tickerWidth = w
+        let x = screen.frame.midX - w / 2
+        let y = screen.frame.maxY - menuBarHeight
+
+        let frame = NSRect(x: x, y: y, width: w, height: tickerHeight)
+        tickerView = TickerView(frame: NSRect(origin: .zero, size: frame.size))
+
+        super.init(
+            contentRect: frame,
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
+
+        self.level = .statusBar
+        self.backgroundColor = NSColor(red: 0.02, green: 0.02, blue: 0.04, alpha: 1.0)
+        self.isOpaque = false
+        self.hasShadow = false
+        self.collectionBehavior = [.canJoinAllSpaces, .stationary]
+        self.ignoresMouseEvents = true
+        self.isMovableByWindowBackground = false
+
+        tickerView.autoresizingMask = [.width, .height]
+        tickerView.wantsLayer = true
+        tickerView.layer?.cornerRadius = 3
+        tickerView.layer?.masksToBounds = true
+        contentView = tickerView
+    }
+
+    func updateWithQuotes(_ allQuotes: [StockQuote]) {
+        let keys = combinedSymbolKeys
+        let filtered = allQuotes.filter { keys.contains($0.symbol) }
+        let segments = Self.buildSegments(from: filtered)
+        tickerView.updateSegments(segments)
+    }
+
+    func updateWidth(_ width: CGFloat) {
+        tickerWidth = width
+        let menuBarHeight = NSStatusBar.system.thickness
+        let x = screen_.frame.midX - width / 2
+        let y = screen_.frame.maxY - menuBarHeight
+        setFrame(NSRect(x: x, y: y, width: width, height: menuBarHeight), display: true)
+    }
+
+    static func buildSegments(from quotes: [StockQuote]) -> [ColoredSegment] {
+        if quotes.isEmpty {
+            return [ColoredSegment(text: "  No data  ", color: .amber)]
+        }
+
+        var segments: [ColoredSegment] = []
+        let sep = "    "
+
+        for (i, q) in quotes.enumerated() {
+            let color: LEDColor = q.isUp ? .red : .blue
+            let sign = q.isUp ? "+" : ""
+            segments.append(ColoredSegment(text: "\(q.name) ", color: .white))
+            let priceStr = String(format: "%.2f", q.price)
+            let changeStr = "(\(sign)\(String(format: "%.2f", q.changePercent))%)"
+            segments.append(ColoredSegment(text: "\(priceStr) \(changeStr)", color: color))
+            if i < quotes.count - 1 {
+                segments.append(ColoredSegment(text: sep, color: .amber))
+            }
+        }
+        segments.append(ColoredSegment(text: "          ", color: .amber))
+        return segments
+    }
+}
+
 // MARK: - App Delegate
 
 class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
-    private var tickerView: TickerView!
-    private let tickerWidth: CGFloat = 350
+    private var currentWidth: CGFloat = 700
+    private var currentSpeed: CGFloat = 60
+
+    // All ticker windows (including primary)
+    private var primaryWindow: MonitorTickerWindow?
+    private var secondaryWindows: [MonitorTickerWindow] = []
+    private var screenObserver: Any?
+
+    private var allTickerWindows: [MonitorTickerWindow] {
+        var windows: [MonitorTickerWindow] = []
+        if let pw = primaryWindow { windows.append(pw) }
+        windows.append(contentsOf: secondaryWindows)
+        return windows
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        statusItem = NSStatusBar.system.statusItem(withLength: tickerWidth)
+        // Small icon-only status item for menu access
+        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        if let button = statusItem.button {
+            button.title = "📊"
+        }
+        statusItem.menu = buildMenu()
 
-        guard let button = statusItem.button else { return }
+        // Create primary screen ticker window
+        if let mainScreen = NSScreen.main {
+            let pw = MonitorTickerWindow(screen: mainScreen, groups: [.korean, .us, .currency], width: currentWidth)
+            pw.orderFront(nil)
+            primaryWindow = pw
+        }
 
-        button.wantsLayer = true
-        button.layer?.backgroundColor = NSColor(red: 0.02, green: 0.02, blue: 0.04, alpha: 1.0).cgColor
-        button.layer?.cornerRadius = 3
+        // Auto-enable all secondary screens
+        createSecondaryWindows()
 
-        tickerView = TickerView(frame: button.bounds)
-        tickerView.autoresizingMask = [.width, .height]
-        button.addSubview(tickerView)
+        // Start market data
+        MarketDataManager.shared.onUpdate = { [weak self] quotes in
+            self?.updateAllWindows(quotes: quotes)
+        }
+        MarketDataManager.shared.start()
 
-        // Build menu
+        // Observe screen changes
+        screenObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.handleScreenChange()
+        }
+    }
+
+    private func buildMenu() -> NSMenu {
         let menu = NSMenu()
 
         let refreshItem = NSMenuItem(title: "Refresh", action: #selector(refreshData), keyEquivalent: "r")
@@ -426,6 +581,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         menu.addItem(NSMenuItem.separator())
 
+        // Speed submenu
         let speedMenu = NSMenuItem(title: "Speed", action: nil, keyEquivalent: "")
         let speedSubmenu = NSMenu()
         for (label, spd) in [("Slow", 30), ("Normal", 60), ("Fast", 100), ("Turbo", 160)] {
@@ -438,70 +594,193 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         speedMenu.submenu = speedSubmenu
         menu.addItem(speedMenu)
 
+        // Width submenu (expanded range + custom)
         let widthMenu = NSMenuItem(title: "Width", action: nil, keyEquivalent: "")
         let widthSubmenu = NSMenu()
-        for (label, w) in [("Normal (350)", 350), ("Wide (450)", 450), ("Extra Wide (550)", 550)] {
+        let widthOptions: [(String, Int)] = [
+            ("Compact (200)", 200),
+            ("Small (300)", 300),
+            ("Normal (350)", 350),
+            ("Wide (450)", 450),
+            ("Extra Wide (550)", 550),
+            ("Full (700)", 700),
+        ]
+        for (label, w) in widthOptions {
             let item = NSMenuItem(title: label, action: #selector(setWidth(_:)), keyEquivalent: "")
             item.target = self
             item.tag = w
-            item.state = w == 350 ? .on : .off
+            item.state = w == Int(currentWidth) ? .on : .off
             widthSubmenu.addItem(item)
         }
+        widthSubmenu.addItem(NSMenuItem.separator())
+        let customItem = NSMenuItem(title: "Custom...", action: #selector(setCustomWidth), keyEquivalent: "")
+        customItem.target = self
+        widthSubmenu.addItem(customItem)
         widthMenu.submenu = widthSubmenu
         menu.addItem(widthMenu)
 
         menu.addItem(NSMenuItem.separator())
 
-        // Launch at Login (only works when running as .app bundle)
+        // Monitors submenu
+        let monitorsMenu = NSMenuItem(title: "Monitors", action: nil, keyEquivalent: "")
+        monitorsMenu.submenu = buildMonitorSubmenu()
+        monitorsMenu.tag = 9000
+        menu.addItem(monitorsMenu)
+
+        menu.addItem(NSMenuItem.separator())
+
+        // Launch at Login
         if Bundle.main.bundleIdentifier != nil {
             let loginItem = NSMenuItem(title: "Launch at Login", action: #selector(toggleLaunchAtLogin(_:)), keyEquivalent: "")
             loginItem.target = self
             loginItem.state = launchAtLogin ? .on : .off
             menu.addItem(loginItem)
-
             menu.addItem(NSMenuItem.separator())
         }
 
         let quitItem = NSMenuItem(title: "Quit ScrollBar", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         menu.addItem(quitItem)
 
-        statusItem.menu = menu
-
-        // Start market data
-        MarketDataManager.shared.onUpdate = { [weak self] quotes in
-            self?.updateTicker(quotes: quotes)
-        }
-        MarketDataManager.shared.start()
+        return menu
     }
 
-    private func updateTicker(quotes: [StockQuote]) {
-        if quotes.isEmpty {
-            tickerView.updateSegments([ColoredSegment(text: "  No data available  ", color: .amber)])
-            return
+    private func buildMonitorSubmenu() -> NSMenu {
+        let submenu = NSMenu()
+        let screens = NSScreen.screens
+
+        // Primary screen
+        let primaryScreen = NSScreen.main ?? screens[0]
+        let primaryEnabled = primaryWindow != nil
+
+        let primaryToggle = NSMenuItem(
+            title: "\(primaryScreen.localizedName) (Primary)",
+            action: #selector(togglePrimaryTicker(_:)),
+            keyEquivalent: ""
+        )
+        primaryToggle.target = self
+        primaryToggle.state = primaryEnabled ? .on : .off
+        submenu.addItem(primaryToggle)
+
+        // Primary content group (multi-select)
+        if primaryEnabled, let pw = primaryWindow {
+            let groupMenu = NSMenuItem(title: "  Content", action: nil, keyEquivalent: "")
+            let groupSubmenu = NSMenu()
+            for group in SymbolGroup.allCases {
+                let gItem = NSMenuItem(title: group.rawValue, action: #selector(togglePrimaryGroup(_:)), keyEquivalent: "")
+                gItem.target = self
+                gItem.representedObject = group.rawValue as NSString
+                gItem.state = pw.symbolGroups.contains(group) ? .on : .off
+                groupSubmenu.addItem(gItem)
+            }
+            groupMenu.submenu = groupSubmenu
+            submenu.addItem(groupMenu)
         }
 
-        var segments: [ColoredSegment] = []
-        let sep = "    "
+        // Secondary screens
+        if screens.count > 1 {
+            submenu.addItem(NSMenuItem.separator())
 
-        for (i, q) in quotes.enumerated() {
-            let color: LEDColor = q.isUp ? .red : .blue
-            let sign = q.isUp ? "+" : ""
-            // Name in white
-            segments.append(ColoredSegment(text: "\(q.name) ", color: .white))
-            // Price + change in color
-            let priceStr = String(format: "%.2f", q.price)
-            let changeStr = "(\(sign)\(String(format: "%.2f", q.changePercent))%)"
-            segments.append(ColoredSegment(text: "\(priceStr) \(changeStr)", color: color))
+            for (i, screen) in screens.enumerated() {
+                if screen == primaryScreen { continue }
 
-            if i < quotes.count - 1 {
-                segments.append(ColoredSegment(text: sep, color: .amber))
+                let existing = secondaryWindows.first { $0.screen_ == screen }
+                let isEnabled = existing != nil
+
+                let toggleItem = NSMenuItem(
+                    title: "\(screen.localizedName) (Display \(i + 1))",
+                    action: #selector(toggleSecondaryTicker(_:)),
+                    keyEquivalent: ""
+                )
+                toggleItem.target = self
+                toggleItem.tag = i
+                toggleItem.state = isEnabled ? .on : .off
+                submenu.addItem(toggleItem)
+
+                if isEnabled, let existing = existing {
+                    let groupMenu = NSMenuItem(title: "  Content", action: nil, keyEquivalent: "")
+                    let groupSubmenu = NSMenu()
+                    for group in SymbolGroup.allCases {
+                        let gItem = NSMenuItem(
+                            title: group.rawValue,
+                            action: #selector(toggleSecondaryGroup(_:)),
+                            keyEquivalent: ""
+                        )
+                        gItem.target = self
+                        gItem.tag = i
+                        gItem.representedObject = group.rawValue as NSString
+                        gItem.state = existing.symbolGroups.contains(group) ? .on : .off
+                        groupSubmenu.addItem(gItem)
+                    }
+                    groupMenu.submenu = groupSubmenu
+                    submenu.addItem(groupMenu)
+                }
             }
         }
-        // Trailing space for smooth loop
-        segments.append(ColoredSegment(text: "          ", color: .amber))
 
-        tickerView.updateSegments(segments)
+        return submenu
     }
+
+    private func rebuildMonitorMenu() {
+        guard let menu = statusItem.menu else { return }
+        for item in menu.items where item.tag == 9000 {
+            item.submenu = buildMonitorSubmenu()
+            break
+        }
+    }
+
+    private func handleScreenChange() {
+        // Reposition primary window if screen changed
+        if let pw = primaryWindow, let mainScreen = NSScreen.main {
+            if pw.screen_ != mainScreen {
+                pw.orderOut(nil)
+                let newPW = MonitorTickerWindow(screen: mainScreen, groups: pw.symbolGroups, width: currentWidth)
+                newPW.tickerView.updateSpeed(currentSpeed)
+                newPW.updateWithQuotes(MarketDataManager.shared.quotes)
+                newPW.orderFront(nil)
+                primaryWindow = newPW
+            }
+        }
+
+        // Remove secondary windows whose screens are gone
+        let currentScreens = NSScreen.screens
+        secondaryWindows.removeAll { window in
+            if !currentScreens.contains(window.screen_) {
+                window.orderOut(nil)
+                return true
+            }
+            return false
+        }
+
+        // Auto-enable any new secondary screens
+        createSecondaryWindows()
+
+        rebuildMonitorMenu()
+    }
+
+    private func createSecondaryWindows() {
+        let screens = NSScreen.screens
+        let primaryScreen = NSScreen.main ?? screens[0]
+        for (_, screen) in screens.enumerated() {
+            if screen == primaryScreen { continue }
+            if secondaryWindows.contains(where: { $0.screen_ == screen }) { continue }
+
+            let window = MonitorTickerWindow(screen: screen, groups: [.watchlist], width: currentWidth)
+            window.tickerView.updateSpeed(currentSpeed)
+            window.updateWithQuotes(MarketDataManager.shared.quotes)
+            window.orderFront(nil)
+            secondaryWindows.append(window)
+        }
+    }
+
+    // MARK: - Ticker Updates
+
+    private func updateAllWindows(quotes: [StockQuote]) {
+        for window in allTickerWindows {
+            window.updateWithQuotes(quotes)
+        }
+    }
+
+    // MARK: - Actions
 
     private var launchAtLogin: Bool {
         SMAppService.mainApp.status == .enabled
@@ -527,14 +806,133 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func setSpeed(_ sender: NSMenuItem) {
         sender.menu?.items.forEach { $0.state = .off }
         sender.state = .on
-        tickerView.updateSpeed(CGFloat(sender.tag))
+        currentSpeed = CGFloat(sender.tag)
+        for w in allTickerWindows {
+            w.tickerView.updateSpeed(currentSpeed)
+        }
     }
 
     @objc private func setWidth(_ sender: NSMenuItem) {
-        sender.menu?.items.forEach { $0.state = .off }
+        sender.menu?.items.forEach { item in
+            if item.action == #selector(setWidth(_:)) { item.state = .off }
+        }
         sender.state = .on
-        statusItem.length = CGFloat(sender.tag)
-        tickerView.frame = statusItem.button!.bounds
+        currentWidth = CGFloat(sender.tag)
+        // Apply to all windows
+        for w in allTickerWindows {
+            w.updateWidth(currentWidth)
+        }
+    }
+
+    @objc private func setCustomWidth() {
+        let alert = NSAlert()
+        alert.messageText = "Custom Width"
+        alert.informativeText = "Enter width in pixels (100-800):"
+        alert.addButton(withTitle: "OK")
+        alert.addButton(withTitle: "Cancel")
+
+        let input = NSTextField(frame: NSRect(x: 0, y: 0, width: 120, height: 24))
+        input.stringValue = "\(Int(currentWidth))"
+        alert.accessoryView = input
+
+        let response = alert.runModal()
+        if response == .alertFirstButtonReturn {
+            if let value = Int(input.stringValue), value >= 100, value <= 800 {
+                currentWidth = CGFloat(value)
+                for w in allTickerWindows {
+                    w.updateWidth(currentWidth)
+                }
+                // Uncheck all preset items
+                if let widthSubmenu = statusItem.menu?.items.first(where: { $0.title == "Width" })?.submenu {
+                    widthSubmenu.items.forEach { item in
+                        if item.action == #selector(setWidth(_:)) { item.state = .off }
+                    }
+                }
+            }
+        }
+    }
+
+    @objc private func togglePrimaryTicker(_ sender: NSMenuItem) {
+        if let pw = primaryWindow {
+            pw.orderOut(nil)
+            primaryWindow = nil
+        } else if let mainScreen = NSScreen.main {
+            let pw = MonitorTickerWindow(screen: mainScreen, groups: [.korean, .us, .currency], width: currentWidth)
+            pw.tickerView.updateSpeed(currentSpeed)
+            pw.updateWithQuotes(MarketDataManager.shared.quotes)
+            pw.orderFront(nil)
+            primaryWindow = pw
+        }
+        rebuildMonitorMenu()
+    }
+
+    @objc private func togglePrimaryGroup(_ sender: NSMenuItem) {
+        guard let groupName = sender.representedObject as? String,
+              let group = SymbolGroup(rawValue: groupName),
+              let pw = primaryWindow else { return }
+
+        if group == .all {
+            // "All" toggles exclusively
+            pw.symbolGroups = [.all]
+        } else {
+            pw.symbolGroups.remove(.all)
+            if pw.symbolGroups.contains(group) {
+                pw.symbolGroups.remove(group)
+                if pw.symbolGroups.isEmpty { pw.symbolGroups = [.all] }
+            } else {
+                pw.symbolGroups.insert(group)
+            }
+        }
+        pw.updateWithQuotes(MarketDataManager.shared.quotes)
+        rebuildMonitorMenu()
+    }
+
+    @objc private func toggleSecondaryTicker(_ sender: NSMenuItem) {
+        let screens = NSScreen.screens
+        let screenIndex = sender.tag
+        guard screenIndex < screens.count else { return }
+        let screen = screens[screenIndex]
+
+        if let idx = secondaryWindows.firstIndex(where: { $0.screen_ == screen }) {
+            secondaryWindows[idx].orderOut(nil)
+            secondaryWindows.remove(at: idx)
+        } else {
+            // Default group varies by screen index
+            let groupList: [SymbolGroup] = [.korean, .us, .currency, .watchlist]
+            let defaultGroup = groupList[(screenIndex) % groupList.count]
+
+            let window = MonitorTickerWindow(screen: screen, groups: [defaultGroup], width: currentWidth)
+            window.tickerView.updateSpeed(currentSpeed)
+            window.updateWithQuotes(MarketDataManager.shared.quotes)
+            window.orderFront(nil)
+            secondaryWindows.append(window)
+        }
+        rebuildMonitorMenu()
+    }
+
+    @objc private func toggleSecondaryGroup(_ sender: NSMenuItem) {
+        let screens = NSScreen.screens
+        let screenIndex = sender.tag
+        guard screenIndex < screens.count else { return }
+        let screen = screens[screenIndex]
+        guard let groupName = sender.representedObject as? String,
+              let group = SymbolGroup(rawValue: groupName) else { return }
+
+        if let window = secondaryWindows.first(where: { $0.screen_ == screen }) {
+            if group == .all {
+                window.symbolGroups = [.all]
+            } else {
+                window.symbolGroups.remove(.all)
+                if window.symbolGroups.contains(group) {
+                    window.symbolGroups.remove(group)
+                    if window.symbolGroups.isEmpty { window.symbolGroups = [.all] }
+                } else {
+                    window.symbolGroups.insert(group)
+                }
+            }
+            window.updateWithQuotes(MarketDataManager.shared.quotes)
+        }
+        rebuildMonitorMenu()
     }
 }
 
