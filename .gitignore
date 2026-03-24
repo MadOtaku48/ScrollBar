@@ -1,0 +1,4 @@
+.build/
+.swiftpm/
+ScrollBar.app/
+*.DS_Store
